@@ -220,130 +220,6 @@ class MedusaModelABC(nn.Module):
             return torch.stack(medusa_logits, dim=0), outputs, orig
         return torch.stack(medusa_logits, dim=0)
     
-
-    def adaptive_based_on_previous_step(self, past_accepted_count, max_heads=None):
-        """
-        Dynamically adjust number of heads based on acceptance rate in previous step.
-        
-        Args:
-            past_accepted_count: Number of tokens accepted in previous step
-            max_heads: Maximum number of heads to use (defaults to self.medusa)
-        
-        Returns:
-            optimal_heads: Optimal number of heads to use for next decoding step
-        """
-        if max_heads is None:
-            max_heads = self.medusa
-            
-        # Simple heuristic: Use number of tokens accepted in previous step
-        # with some constraints to stay within reasonable bounds
-        optimal_heads = min(max(past_accepted_count, 2), max_heads)
-        return optimal_heads
-    
-    def adaptive_based_on_current_step(self, candidates_prob, threshold=0.5, max_heads=None):
-        """
-        Dynamically adjust number of heads during current step based on token probability.
-        
-        Args:
-            candidates_prob: Probabilities of candidate tokens
-            threshold: Probability threshold for acceptance
-            max_heads: Maximum number of heads to use (defaults to self.medusa)
-        
-        Returns:
-            prefix_length: Length of trusted prefix to use
-        """
-        if max_heads is None:
-            max_heads = self.medusa
-            
-        # Find the point where probability drops below threshold
-        trusted_indices = (candidates_prob > threshold).nonzero()
-        if len(trusted_indices) == 0:
-            return 1  # Default to at least one head
-        
-        # Get the longest consecutive streak of high-probability tokens
-        consecutive_indices = []
-        current_run = [trusted_indices[0].item()]
-        
-        for i in range(1, len(trusted_indices)):
-            if trusted_indices[i].item() == trusted_indices[i-1].item() + 1:
-                current_run.append(trusted_indices[i].item())
-            else:
-                # End of current run
-                if len(current_run) > len(consecutive_indices):
-                    consecutive_indices = current_run
-                current_run = [trusted_indices[i].item()]
-        
-        # Check the last run
-        if len(current_run) > len(consecutive_indices):
-            consecutive_indices = current_run
-            
-        # If we found a consecutive run, use its length
-        if consecutive_indices:
-            prefix_length = min(len(consecutive_indices), max_heads)
-        else:
-            # Fallback to the highest probability token
-            prefix_length = 1
-            
-        return prefix_length
-    
-    def tree_decoding_adaptive(
-        self,
-        tree_candidates,
-        past_key_values,
-        medusa_position_ids,
-        input_ids,
-        retrieve_indices,
-        num_active_heads=None
-    ):
-        """
-        Modified tree_decoding to handle variable number of heads.
-        
-        Args:
-            tree_candidates: Input tokens for tree decoding
-            past_key_values: Past key-value states for attention
-            medusa_position_ids: Position IDs for the Medusa tree
-            input_ids: Original input token IDs
-            retrieve_indices: Indices for retrieving from the tree
-            num_active_heads: Number of active heads to use (None means use all)
-            
-        Returns:
-            medusa_logits, logits, outputs: Outputs from tree decoding
-        """
-        # Compute new position IDs by adding the Medusa position IDs to the length of the input sequence
-        position_ids = medusa_position_ids + input_ids.shape[1]
-        
-        # If num_active_heads is specified, limit the active positions
-        if num_active_heads is not None:
-            # Limit position_ids to only active heads
-            active_position_ids = position_ids[:num_active_heads+1]  # +1 for base model
-            
-            # Create a limited tree_candidates tensor for active heads
-            active_tree_candidates = tree_candidates[:, :num_active_heads+1]  # +1 for base model
-            
-            # Use the model to decode with limited tree
-            tree_medusa_logits, outputs, tree_logits = self(
-                active_tree_candidates,
-                output_orig=True,
-                past_key_values=past_key_values,
-                position_ids=active_position_ids,
-                medusa_forward=True,
-            )
-        else:
-            # Standard tree decoding with all heads
-            tree_medusa_logits, outputs, tree_logits = self(
-                tree_candidates,
-                output_orig=True,
-                past_key_values=past_key_values,
-                position_ids=position_ids,
-                medusa_forward=True,
-            )
-        
-        # Reorder the obtained logits based on the retrieve_indices
-        logits = tree_logits[0, retrieve_indices]
-        medusa_logits = tree_medusa_logits[:, 0, retrieve_indices]
-        
-        return medusa_logits, logits, outputs
-    
     def get_medusa_choice(self, model_name):
         if 'vicuna' in model_name:
             if '7b' in model_name:
@@ -442,7 +318,7 @@ class MedusaModelABC(nn.Module):
 
         for idx in range(max_steps):
             if adaptive_mode == "previous":
-                num_heads = self.adaptive_based_on_previous_step(prev_accept_length)
+                num_heads = adaptive_based_on_previous_step(prev_accept_length)
         
                 # Generate candidates using limited number of heads
                 candidates, tree_candidates = generate_candidates(
@@ -459,7 +335,7 @@ class MedusaModelABC(nn.Module):
                 )
                 
                 # Use tree decoding with limited number of heads
-                medusa_logits, logits, outputs = self.tree_decoding_adaptive(
+                medusa_logits, logits, outputs = tree_decoding_adaptive(
                     tree_candidates,
                     past_key_values,
                     medusa_buffers["medusa_position_ids"],
@@ -493,13 +369,13 @@ class MedusaModelABC(nn.Module):
                 ).squeeze(-1)
                 
                 # Determine optimal prefix length based on token probabilities
-                num_heads = self.adaptive_based_on_current_step(
+                num_heads = adaptive_based_on_current_step(
                     candidates_prob, 
                     threshold=entropy_threshold
                 )
                 
                 # Use tree decoding with determined prefix length
-                medusa_logits, logits, outputs = self.tree_decoding_adaptive(
+                medusa_logits, logits, outputs = tree_decoding_adaptive(
                     tree_candidates,
                     past_key_values,
                     medusa_buffers["medusa_position_ids"],
