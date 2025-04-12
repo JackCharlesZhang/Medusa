@@ -22,7 +22,6 @@ class MedusaConfig(PretrainedConfig):
     Configuration class for Medusa model.
 
     Args:
-        medusa_num_heads (int, optional): Number of heads for the Medusa layer. Default is 2.
         medusa_num_layers (int, optional): Number of Medusa layers. Default is 1.
         base_model_name_or_path (str, optional): The name or path of the base model. Default is "lmsys/vicuna-7b-v1.3".
         **kwargs: Additional keyword arguments to be passed to the parent class constructor.
@@ -30,13 +29,11 @@ class MedusaConfig(PretrainedConfig):
 
     def __init__(
         self,
-        medusa_num_heads=5,
         medusa_num_layers=1,
         base_model_name_or_path="lmsys/vicuna-7b-v1.3",
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.medusa_num_heads = medusa_num_heads
         self.medusa_num_layers = medusa_num_layers
         self.base_model_name_or_path = base_model_name_or_path
 
@@ -80,13 +77,6 @@ class MedusaModelABC(nn.Module):
     followed by a linear layer.
     """
 
-    # Load the base model
-    # base_model_prefix = "model"
-    # supports_gradient_checkpointing = True
-    # _no_split_modules = ["LlamaDecoderLayer", "MistralDecoderLayer"]
-    # _skip_keys_device_placement = "past_key_values"
-    # _supports_flash_attn_2 = True
-
     def __init__(
         self,
         config,
@@ -96,19 +86,16 @@ class MedusaModelABC(nn.Module):
             config (PretrainedConfig): The configuration of the MedusaModel.
         """
         super().__init__(config)
-        # For compatibility with the old APIs
 
-        medusa_num_heads = config.medusa_num_heads
         medusa_num_layers = config.medusa_num_layers
         base_model_name_or_path = config._name_or_path
         self.hidden_size = config.hidden_size
         self.vocab_size = config.vocab_size
-        self.medusa = medusa_num_heads
         self.medusa_num_layers = medusa_num_layers
         self.base_model_name_or_path = base_model_name_or_path
         self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name_or_path)
-        # Create a list of Medusa heads
-        self.medusa_head = nn.ModuleList(
+        # Create a list of configs of Medusa heads
+        self.medusa_head_configs = nn.ModuleList(nn.ModuleList(
             [
                 nn.Sequential(
                     *([ResBlock(self.hidden_size)] * medusa_num_layers),
@@ -116,7 +103,10 @@ class MedusaModelABC(nn.Module):
                 )
                 for _ in range(medusa_num_heads)
             ]
-        )
+            for medusa_num_heads in range(2, 8)
+        ))
+        self.cur_num_medusa_heads = 5
+
     # Add a link named base_model to self
     @property
     def base_model(self):
@@ -138,6 +128,8 @@ class MedusaModelABC(nn.Module):
                 config=config,
             )
         except:
+            ### JCZ: IGNORE THIS
+
             config = MedusaConfig.from_pretrained(pretrained_model_name_or_path)
             base_model_config = AutoConfig.from_pretrained(config.base_model_name_or_path)
             base_model_config.medusa_num_heads = 5 # TODO: fix the uploaded config (only include 2 heads)
@@ -214,8 +206,8 @@ class MedusaModelABC(nn.Module):
         hidden_states = outputs[0].clone()
         medusa_logits = []
         # TODO: Consider parallelizing this loop for efficiency?
-        for i in range(self.medusa):
-            medusa_logits.append(self.medusa_head[i](hidden_states))
+        for i in range(self.cur_num_medusa_heads):
+            medusa_logits.append(self.medusa_head_configs[self.cur_num_medusa_heads-2][i](hidden_states)) # hardcoded -2 for implementation speed to get indexing right
         if output_orig:
             return torch.stack(medusa_logits, dim=0), outputs, orig
         return torch.stack(medusa_logits, dim=0)
@@ -275,7 +267,7 @@ class MedusaModelABC(nn.Module):
 
         # Cache medusa buffers (the fixed patterns for tree attention)
         if medusa_choices is None:
-            medusa_choices = self.get_medusa_choice(self.base_model_name_or_path)
+            medusa_choices = self.get_medusa_choice(self.base_model_name_or_path)  ### come back to this
 
         if hasattr(self, "medusa_choices") and self.medusa_choices == medusa_choices:
             # Load the cached medusa buffer
