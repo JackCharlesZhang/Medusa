@@ -285,7 +285,19 @@ class LazySupervisedDataset(Dataset):
         return ret
 
 
-def make_raw_supervised_data_module(
+def read_jsonl(path: str) -> Sequence[Dict]:
+    """Read a JSONL file.
+
+    Args:
+        path (str): Path to the JSONL file.
+
+    Returns:
+        list: A list of dictionaries.
+    """
+    with open(path, "r") as f:
+        return [json.loads(line) for line in f]
+    
+def make_supervised_data_module(
     tokenizer: transformers.PreTrainedTokenizer, data_args
 ) -> Dict:
     """Make dataset and collator for supervised fine-tuning.
