@@ -74,7 +74,7 @@ class CustomizedTrainer(Trainer):
             medusa_logits = medusa_logits.view(-1, logits.shape[-1])
             medusa_labels = medusa_labels.view(-1)
             medusa_labels = medusa_labels.to(medusa_logits.device)
-            loss_i = 0.8 ** (i+1) + loss_fct(medusa_logits, medusa_labels) # from paper
+            loss_i = 0.8 ** (i+1) * loss_fct(medusa_logits, medusa_labels) # from paper
             loss += loss_i
             not_ignore = medusa_labels.ne(IGNORE_TOKEN_ID)
             medusa_labels = medusa_labels[not_ignore]
