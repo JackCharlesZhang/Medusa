@@ -422,9 +422,13 @@ def train():
         # Modify the tokenizer internal state before saving.
         tokenizer.encode("Test", truncation=None, padding="do_not_pad")
         tokenizer.save_pretrained(training_args.output_dir)
-        save_file(
+        # save_file(
+        #     state_dict,
+        #     os.path.join(training_args.output_dir, "medusa_lm_head.safetensors"),
+        # )
+        torch.save(
             state_dict,
-            os.path.join(training_args.output_dir, "medusa_lm_head.safetensors"),
+            os.path.join(training_args.output_dir, "medusa_lm_head.pt"),
         )
 
 
