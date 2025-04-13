@@ -389,7 +389,7 @@ def train():
         medusa_num_heads=training_args.medusa_num_heads,
         medusa_num_layers=training_args.medusa_num_layers,
         base_model_name_or_path=model_args.model_name_or_path,
-        version="2"
+        version="1"
     )
 
     # Save Medusa config

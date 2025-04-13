@@ -25,7 +25,7 @@ class MedusaConfig(PretrainedConfig):
         self,
         medusa_num_heads=4,
         medusa_num_layers=1,
-        version="2",
+        version="1",
         base_model_name_or_path="lmsys/vicuna-7b-v1.3",
         **kwargs,
     ):
@@ -99,14 +99,24 @@ class MedusaModel(nn.Module):
         self.base_model_name_or_path = base_model_name_or_path
         self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name_or_path)
         # Create a list of Medusa heads
+        # self.medusa_head = nn.ModuleList(
+        #     [
+        #         nn.Sequential(
+        #             *([ResBlock(self.hidden_size)] * medusa_num_layers),
+        #         )
+        #         for _ in range(medusa_num_heads)
+        #     ]
+        # )
         self.medusa_head = nn.ModuleList(
             [
                 nn.Sequential(
                     *([ResBlock(self.hidden_size)] * medusa_num_layers),
+                    nn.Linear(self.hidden_size, self.vocab_size, bias=False),
                 )
                 for _ in range(medusa_num_heads)
             ]
         )
+
 
         # Ensure medusa_head's dtype and device align with the base_model
         self.medusa_head.to(self.base_model.dtype).to(self.base_model.device)
@@ -200,10 +210,12 @@ class MedusaModel(nn.Module):
         hidden_states = outputs[0].clone()
         medusa_logits = []
         # TODO: Consider parallelizing this loop for efficiency?
+        # for i in range(self.medusa):
+        #     mhidden_states = self.medusa_head[i](hidden_states)
+        #     mlogits = self.base_model.lm_head(mhidden_states)
+        #     medusa_logits.append(mlogits)
         for i in range(self.medusa):
-            mhidden_states = self.medusa_head[i](hidden_states)
-            mlogits = self.base_model.lm_head(mhidden_states)
-            medusa_logits.append(mlogits)
+            medusa_logits.append(self.medusa_head[i](hidden_states))
         if output_orig:
             return torch.stack(medusa_logits, dim=0), outputs, orig
         return torch.stack(medusa_logits, dim=0)
