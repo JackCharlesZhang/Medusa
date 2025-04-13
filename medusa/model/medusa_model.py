@@ -22,6 +22,7 @@ class MedusaConfig(PretrainedConfig):
     Configuration class for Medusa model.
 
     Args:
+        medusa_num_heads (int, optional): Number of heads for the Medusa layer. Default is 2.
         medusa_num_layers (int, optional): Number of Medusa layers. Default is 1.
         base_model_name_or_path (str, optional): The name or path of the base model. Default is "lmsys/vicuna-7b-v1.3".
         **kwargs: Additional keyword arguments to be passed to the parent class constructor.
@@ -29,11 +30,13 @@ class MedusaConfig(PretrainedConfig):
 
     def __init__(
         self,
+        medusa_num_heads=5,
         medusa_num_layers=1,
         base_model_name_or_path="lmsys/vicuna-7b-v1.3",
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.medusa_num_heads = medusa_num_heads
         self.medusa_num_layers = medusa_num_layers
         self.base_model_name_or_path = base_model_name_or_path
 
@@ -77,6 +80,13 @@ class MedusaModelABC(nn.Module):
     followed by a linear layer.
     """
 
+    # Load the base model
+    # base_model_prefix = "model"
+    # supports_gradient_checkpointing = True
+    # _no_split_modules = ["LlamaDecoderLayer", "MistralDecoderLayer"]
+    # _skip_keys_device_placement = "past_key_values"
+    # _supports_flash_attn_2 = True
+
     def __init__(
         self,
         config,
@@ -86,16 +96,19 @@ class MedusaModelABC(nn.Module):
             config (PretrainedConfig): The configuration of the MedusaModel.
         """
         super().__init__(config)
+        # For compatibility with the old APIs
 
+        medusa_num_heads = config.medusa_num_heads
         medusa_num_layers = config.medusa_num_layers
         base_model_name_or_path = config._name_or_path
         self.hidden_size = config.hidden_size
         self.vocab_size = config.vocab_size
+        self.medusa = medusa_num_heads
         self.medusa_num_layers = medusa_num_layers
         self.base_model_name_or_path = base_model_name_or_path
         self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name_or_path)
-        # Create a list of configs of Medusa heads
-        self.medusa_head_configs = nn.ModuleList(nn.ModuleList(
+        # Create a list of Medusa heads
+        self.medusa_head = nn.ModuleList(
             [
                 nn.Sequential(
                     *([ResBlock(self.hidden_size)] * medusa_num_layers),
@@ -103,10 +116,7 @@ class MedusaModelABC(nn.Module):
                 )
                 for _ in range(medusa_num_heads)
             ]
-            for medusa_num_heads in range(2, 8)
-        ))
-        self.cur_num_medusa_heads = 5
-
+        )
     # Add a link named base_model to self
     @property
     def base_model(self):
@@ -128,8 +138,6 @@ class MedusaModelABC(nn.Module):
                 config=config,
             )
         except:
-            ### JCZ: IGNORE THIS
-
             config = MedusaConfig.from_pretrained(pretrained_model_name_or_path)
             base_model_config = AutoConfig.from_pretrained(config.base_model_name_or_path)
             base_model_config.medusa_num_heads = 5 # TODO: fix the uploaded config (only include 2 heads)
@@ -206,12 +214,11 @@ class MedusaModelABC(nn.Module):
         hidden_states = outputs[0].clone()
         medusa_logits = []
         # TODO: Consider parallelizing this loop for efficiency?
-        for i in range(self.cur_num_medusa_heads):
-            medusa_logits.append(self.medusa_head_configs[self.cur_num_medusa_heads-2][i](hidden_states)) # hardcoded -2 for implementation speed to get indexing right
+        for i in range(self.medusa):
+            medusa_logits.append(self.medusa_head[i](hidden_states))
         if output_orig:
             return torch.stack(medusa_logits, dim=0), outputs, orig
         return torch.stack(medusa_logits, dim=0)
-    
     def get_medusa_choice(self, model_name):
         if 'vicuna' in model_name:
             if '7b' in model_name:
@@ -239,9 +246,7 @@ class MedusaModelABC(nn.Module):
         posterior_alpha=0.3,
         top_p=0.8, 
         sampling = 'typical', 
-        fast = True,
-        adaptive_mode = None,
-        entropy_threshold = 0.5
+        fast = True
     ):
         """
         Args:
@@ -254,8 +259,6 @@ class MedusaModelABC(nn.Module):
             top_p (float, optional): Cumulative probability threshold for nucleus sampling. Defaults to 0.8.
             sampling (str, optional): Defines the sampling strategy ('typical' or 'nucleus'). Defaults to 'typical'.
             fast (bool, optional): If True, enables faster, deterministic decoding for typical sampling. Defaults to False.
-            adaptive_mode (str, optional): Defines the adaptive mode for determining the heuristic for number of Medusa heads.
-            entropy_threshold (float, optional): Threshold for token probability in current step mode. Default is 0.5.
         Returns:
             torch.Tensor: Output token IDs.
 
@@ -267,7 +270,7 @@ class MedusaModelABC(nn.Module):
 
         # Cache medusa buffers (the fixed patterns for tree attention)
         if medusa_choices is None:
-            medusa_choices = self.get_medusa_choice(self.base_model_name_or_path)  ### come back to this
+            medusa_choices = self.get_medusa_choice(self.base_model_name_or_path)
 
         if hasattr(self, "medusa_choices") and self.medusa_choices == medusa_choices:
             # Load the cached medusa buffer
@@ -306,106 +309,37 @@ class MedusaModelABC(nn.Module):
         )
 
         new_token = 0
-        prev_accept_length = 5
+        last_round_token = 0
 
         for idx in range(max_steps):
-            if adaptive_mode == "previous":
-                num_heads = adaptive_based_on_previous_step(prev_accept_length)
-        
-                # Generate candidates using limited number of heads
-                candidates, tree_candidates = generate_candidates(
-                    medusa_logits[:num_heads],  # Use only the first num_heads
-                    logits,
-                    medusa_buffers["tree_indices"],
-                    medusa_buffers["retrieve_indices"],
-                    temperature=temperature,
-                    posterior_alpha=posterior_alpha,
-                    posterior_threshold=posterior_threshold,
-                    top_p=top_p,
-                    sampling=sampling,
-                    fast=fast,
-                )
-                
-                # Use tree decoding with limited number of heads
-                medusa_logits, logits, outputs = tree_decoding_adaptive(
-                    tree_candidates,
-                    past_key_values,
-                    medusa_buffers["medusa_position_ids"],
-                    input_ids,
-                    medusa_buffers["retrieve_indices"],
-                    num_active_heads=num_heads
-                )
+            # Generate candidates with topk predictions from Medusa heads
+            candidates, tree_candidates = generate_candidates(
+                medusa_logits,
+                logits,
+                medusa_buffers["tree_indices"],
+                medusa_buffers["retrieve_indices"],
+                temperature=temperature,
+                posterior_alpha=posterior_alpha,
+                posterior_threshold=posterior_threshold,
+                top_p=top_p,
+                sampling=sampling,
+                fast=fast,
+            )
 
-            elif adaptive_mode == "current":
-                candidates, tree_candidates = generate_candidates(
-                    medusa_logits,
-                    logits,
-                    medusa_buffers["tree_indices"],
-                    medusa_buffers["retrieve_indices"],
-                    temperature=temperature,
-                    posterior_alpha=posterior_alpha,
-                    posterior_threshold=posterior_threshold,
-                    top_p=top_p,
-                    sampling=sampling,
-                    fast=fast,
-                )
-                
-                # Calculate token probabilities
-                if temperature > 0:
-                    probs = torch.softmax(logits[:, :-1] / temperature, dim=-1)
-                else:
-                    probs = torch.softmax(logits[:, :-1], dim=-1)
-                    
-                candidates_prob = torch.gather(
-                    probs, dim=-1, index=candidates[:, 1:].unsqueeze(-1)
-                ).squeeze(-1)
-                
-                # Determine optimal prefix length based on token probabilities
-                num_heads = adaptive_based_on_current_step(
-                    candidates_prob, 
-                    threshold=entropy_threshold
-                )
-                
-                # Use tree decoding with determined prefix length
-                medusa_logits, logits, outputs = tree_decoding_adaptive(
-                    tree_candidates,
-                    past_key_values,
-                    medusa_buffers["medusa_position_ids"],
-                    input_ids,
-                    medusa_buffers["retrieve_indices"],
-                    num_active_heads=num_heads
-                )
-                
-            else:
-                # Original non-adaptive Medusa
-                candidates, tree_candidates = generate_candidates(
-                    medusa_logits,
-                    logits,
-                    medusa_buffers["tree_indices"],
-                    medusa_buffers["retrieve_indices"],
-                    temperature=temperature,
-                    posterior_alpha=posterior_alpha,
-                    posterior_threshold=posterior_threshold,
-                    top_p=top_p,
-                    sampling=sampling,
-                    fast=fast,
-                )
-                
-                medusa_logits, logits, outputs = tree_decoding(
-                    self,
-                    tree_candidates,
-                    past_key_values,
-                    medusa_buffers["medusa_position_ids"],
-                    input_ids,
-                    medusa_buffers["retrieve_indices"],
-                )
+            # Use tree attention to verify the candidates and get predictions
+            medusa_logits, logits, outputs = tree_decoding(
+                self,
+                tree_candidates,
+                past_key_values,
+                medusa_buffers["medusa_position_ids"],
+                input_ids,
+                medusa_buffers["retrieve_indices"],
+            )
 
             # Evaluate the posterior of the candidates to select the accepted candidate prefix
             best_candidate, accept_length = evaluate_posterior(
                 logits, candidates, temperature, posterior_threshold, posterior_alpha, top_p=top_p, sampling=sampling, fast=fast
             )
-
-            prev_accept_length = accept_length + 1
 
             # Update the input_ids and logits
             input_ids, logits, medusa_logits, new_token = update_inference_inputs(
