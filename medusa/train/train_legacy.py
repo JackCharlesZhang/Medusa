@@ -40,7 +40,6 @@ from medusa.model.medusa_model_legacy import MedusaModel, MedusaConfig
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
-
 # Customized for training Medusa heads
 class CustomizedTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False):
@@ -75,7 +74,7 @@ class CustomizedTrainer(Trainer):
             medusa_logits = medusa_logits.view(-1, logits.shape[-1])
             medusa_labels = medusa_labels.view(-1)
             medusa_labels = medusa_labels.to(medusa_logits.device)
-            loss_i = loss_fct(medusa_logits, medusa_labels)
+            loss_i = 0.8 ** (i+1) * loss_fct(medusa_logits, medusa_labels) # from paper
             loss += loss_i
             not_ignore = medusa_labels.ne(IGNORE_TOKEN_ID)
             medusa_labels = medusa_labels[not_ignore]
@@ -231,7 +230,8 @@ class SupervisedDataset(Dataset):
         super(SupervisedDataset, self).__init__()
 
         rank0_print("Formatting inputs...")
-        sources = raw_data
+        #sources = raw_data
+        sources = [example["conversations"] for example in raw_data]
         data_dict = preprocess(sources, tokenizer)
 
         self.input_ids = data_dict["input_ids"]
@@ -275,7 +275,7 @@ class LazySupervisedDataset(Dataset):
         if i in self.cached_data_dict:
             return self.cached_data_dict[i]
 
-        ret = preprocess([self.raw_data[i]], self.tokenizer)
+        ret = preprocess([self.raw_data[i]["conversations"]], self.tokenizer)
         ret = dict(
             input_ids=ret["input_ids"][0],
             labels=ret["labels"][0],
@@ -286,6 +286,18 @@ class LazySupervisedDataset(Dataset):
         return ret
 
 
+def read_jsonl(path: str) -> Sequence[Dict]:
+    """Read a JSONL file.
+
+    Args:
+        path (str): Path to the JSONL file.
+
+    Returns:
+        list: A list of dictionaries.
+    """
+    with open(path, "r") as f:
+        return [json.loads(line) for line in f]
+    
 def make_supervised_data_module(
     tokenizer: transformers.PreTrainedTokenizer, data_args
 ) -> Dict:
@@ -303,14 +315,11 @@ def make_supervised_data_module(
     )
     rank0_print("Loading data...")
 
-    train_json = json.load(open(data_args.data_path, "r"))
+    train_json = read_jsonl(os.path.join(data_args.data_path, "train.json"))
     train_dataset = dataset_cls(train_json, tokenizer=tokenizer)
 
-    if data_args.eval_data_path:
-        eval_json = json.load(open(data_args.eval_data_path, "r"))
-        eval_dataset = dataset_cls(eval_json, tokenizer=tokenizer)
-    else:
-        eval_dataset = None
+    eval_json = read_jsonl(os.path.join(data_args.data_path, "val.json"))
+    eval_dataset = dataset_cls(eval_json, tokenizer=tokenizer)
 
     return dict(train_dataset=train_dataset, eval_dataset=eval_dataset)
 
@@ -381,7 +390,7 @@ def train():
         medusa_num_heads=training_args.medusa_num_heads,
         medusa_num_layers=training_args.medusa_num_layers,
         base_model_name_or_path=model_args.model_name_or_path,
-        version="2"
+        version="1"
     )
 
     # Save Medusa config
