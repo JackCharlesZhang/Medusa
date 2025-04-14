@@ -1,4 +1,4 @@
-torchrun --nproc_per_node=4 medusa/train/train_legacy.py --model_name_or_path lmsys/vicuna-7b-v1.3 \
+torchrun --nproc_per_node=1 medusa/train/train_legacy.py --model_name_or_path lmsys/vicuna-7b-v1.3 \
     --data_path medusa/data/sharegpt/raw \
     --bf16 True \
     --output_dir test \
